@@ -10,11 +10,11 @@ SELECT COUNT(*) FROM accounts LEFT JOIN currencies ON accounts.ISOnum = currenci
 
 --Вывести все счета и количество операций по этим счетам после 01.08.2004.
 
-SELECT accounts.id, COUNT(*) AS AMOUNT FROM accounts LEFT JOIN operations_log ON accounts.id = operations_log.accountid GROUP BY accounts.id; 
+SELECT accounts.id, COUNT(operations_log.id) AS AMOUNT FROM accounts LEFT JOIN operations_log ON accounts.id = operations_log.accountid WHERE operations_log.opdate >= '2004-08-2 00:00:00' GROUP BY accounts.id; 
 
 --Вывести все операции по рублевым счетам (номер операции, тип операции, сумма операции, дата операции).
 
-SELECT operations_log.id AS NUM, operations_log.optype AS NAME, operations_log.value, operations_log.opdate FROM accounts LEFT JOIN operations_log ON accounts.id = operations_log.accountid LEFT JOIN currencies ON accounts.ISOnum = currencies.ISOnum WHERE currencies.name = 'RUB';
+SELECT operations_log.id AS NUM, operations_log.optype AS NAME, operations_log.value, operations_log.opdate FROM operations_log LEFT JOIN accounts ON accounts.id = operations_log.accountid LEFT JOIN currencies ON accounts.ISOnum = currencies.ISOnum WHERE currencies.name = 'RUB';
 
 --Вывести клиентов, у которых открыто несколько счетов.
 
@@ -22,7 +22,7 @@ SELECT clients.id,  fname, sname, thname, pass_num FROM clients LEFT JOIN accoun
 
 --Вывести клиентов, у которых ни на одном счете не осталось средств.
 
-SELECT clients.id,  fname, sname, thname, pass_num FROM clients LEFT JOIN accounts ON clients.id = accounts.client_id WHERE accounts.value = 0.0 GROUP BY clients.id  HAVING COUNT(*) > 1;
+SELECT clients.id,  fname, sname, thname, pass_num FROM clients LEFT JOIN accounts ON clients.id = accounts.client_id WHERE accounts.value = 0 GROUP BY clients.id  HAVING COUNT(*) > 1;
 
 --Вывести список населенных пунктов, в которых проживают клиенты банка.
 
@@ -34,9 +34,9 @@ SELECT currencies.name AS CURRENCY ,COUNT(*) AS AMOUNT FROM accounts LEFT JOIN c
 CREATE TABLE clients (
     id INT UNIQUE NOT NULL AUTO_INCREMENT,
     pass_num INT  NOT NULL CHECK(pass_num >= 0),
-    fname VARCHAR(255) NOT NULL CHECK(fname LIKE '^[A-Z][a-z]*$' ), 
-    sname VARCHAR(255) NOT NULL CHECK (sname LIKE '^[A-Z][a-z]*$'),
-    thname VARCHAR(255) CHECK (thname LIKE '^[A-Z][a-z]*$'),
+    fname VARCHAR(255) NOT NULL , 
+    sname VARCHAR(255) NOT NULL ,
+    thname VARCHAR(255),
     adress_id INT,
     PRIMARY KEY (id),
     FOREIGN KEY (adress_id) REFERENCES adresses(id)      
@@ -44,16 +44,16 @@ CREATE TABLE clients (
 
 CREATE TABLE adresses (
     id INT NOT NULL UNIQUE AUTO_INCREMENT,
-    country VARCHAR(255) NOT NULL CHECK(country LIKE '[:alpha:]+'),
-    city VARCHAR(255) NOT NULL CHECK(city LIKE '[:alpha:]+'),
-    street VARCHAR(255) NOT NULL CHECK (street LIKE '[:alpha:]+'),
-    home VARCHAR(255) NOT NULL CHECK (home LIKE '^[1-9]+[\]?[1-9]$'),
+    country VARCHAR(255) NOT NULL,
+    city VARCHAR(255) NOT NULL,
+    street VARCHAR(255) NOT NULL,
+    home VARCHAR(255) NOT NULL,
     PRIMARY KEY (id)
 );
 
 CREATE TABLE currencies (
     ISOnum INT NOT NULL PRIMARY KEY CHECK (ISOnum DIV 1000 = 0), 
-    name VARCHAR(3) NOT NULL UNIQUE CHECK (name LIKE '[A-Z]+'),
+    name VARCHAR(3) NOT NULL UNIQUE ,
     weight DOUBLE NOT NULL CHECK (weight>0)
 );
 
@@ -124,7 +124,7 @@ BEGIN
         names VARCHAR(765), 
         account_values TEXT
     );
-    WHILE (astate = 1 )
+    WHILE (cstate = 1 )
     DO
         label1: BEGIN 
             DECLARE acc_amount, negative_acc, acc_id INT default 0;
@@ -144,9 +144,11 @@ BEGIN
             WHILE(astate = 1)
             DO
                 FETCH accounts_ INTO acc_id, val, valname;
+                SELECT acc_id, val, valname;
                 SET str = CONCAT(str, acc_id, ' (', valname, '): ', val, ' ');
+                
             END WHILE;
-            INSERT INTO  debtors (id, names, accounts_values) VALUES (cid, names_, str);
+            INSERT INTO  debtors (id, names, account_values) VALUES (cid, names_, str);
             END IF;
             CLOSE accounts_;
             END label1;
@@ -197,6 +199,7 @@ END;
 CREATE TRIGGER account_close_checker BEFORE UPDATE on accounts 
 FOR EACH ROW 
 BEGIN 
+
     DECLARE rest DOUBLE DEFAULT 0.0;
         DECLARE cacc_id, acc_id, c_id INT;
     IF (NEW.close_DATA != NULL) THEN
