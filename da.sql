@@ -14,7 +14,7 @@ SELECT accounts.id, COUNT(*) AS AMOUNT FROM accounts LEFT JOIN operations_log ON
 
 --Вывести все операции по рублевым счетам (номер операции, тип операции, сумма операции, дата операции).
 
-SELECT operations_log.id AS NUM, operations_log.optype AS NAME, operations_log.value FROM accounts LEFT JOIN operations_log ON accounts.id = operations_log.accountid LEFT JOIN currencies ON accounts.ISOnum = currencies.ISOnum WHERE currencies.name = 'RUB';
+SELECT operations_log.id AS NUM, operations_log.optype AS NAME, operations_log.value, operations_log.opdate FROM accounts LEFT JOIN operations_log ON accounts.id = operations_log.accountid LEFT JOIN currencies ON accounts.ISOnum = currencies.ISOnum WHERE currencies.name = 'RUB';
 
 --Вывести клиентов, у которых открыто несколько счетов.
 
@@ -98,46 +98,121 @@ BEGIN
     END IF;
 END;
 
-CREATE PROCEDURE Tranfer (IN source INT, IN dest INT, IN ante DOUBLE)
+CREATE PROCEDURE Transfer (IN source INT, IN dest INT, IN ante DOUBLE)
 LANGUAGE SQL
 SQL SECURITY INVOKER
 BEGIN 
-    INSERT operations_log (accountid, optype, value) VALUES (source, 'wite-off', ante), (dest, 'addition', ante);
+    INSERT INTO operations_log (accountid, optype, value) VALUES (source, 'wite-off', ante), (dest, 'addition', ante);
     --same as: 
     --UPDATE accounts SET accounts.value = accounts.value - ante WHERE accounts.id = source;
     --UPDATE accounts SET accounts.value = accounts.value + ante WHERE accounts.id = dest;
 END;
 
 CREATE PROCEDURE get_debtors ()
-LANGEAGE SQL
-SQL SECURITY INVOKER
 BEGIN
+    DECLARE cstate, astate INT DEFAULT 1;
+    DECLARE cid INT;
+    DECLARE f, s, th VARCHAR(255);
+    DECLARE names_ CHAR(255);
+    DECLARE  clients_ CURSOR  FOR 
+        SELECT id, fname, sname, thname FROM clients;
+        DECLARE CONTINUE HANDLER FOR SQLSTATE '02000' SET cstate = 0;
+	OPEN clients_;
     DROP TABLE IF EXISTS debtors;
     CREATE TABLE IF NOT EXISTS debtors (
         id INT PRIMARY KEY,
         names VARCHAR(765), 
-        account_values CHAR
+        account_values TEXT
     );
-    DECLARE cstate, astate INT DEFAULT 1;
-    DECLARE cid INT;
-    DECLARE f, s, th VARCHAR(255);
-    DECALE names_ CHAR;
-    DECLARE CURSOR clients_ FOR 
-        SELECT id, fname, sname, thname FROM clients;
-    DECLARE CONTINUE HANDLER FOR SQLSTATE '02000' SET cstate = 0;
-    WHILE (state = 1 )
+    WHILE (astate = 1 )
     DO
-        FETCH clients INTO cid, f, s, th;
-        SET names_ = CONCAT(f, ' ',  s, ' ',  th);
-        DECLARE CURSOR accounts_ FOR
-            SELECT value FROM accounts LEFT JOIN WHERE client_id = cid;
-        DECLARE CONTINUE HANDLER FOR SQLSTATE '02000' SET astate = 0;
-            DECLARE val DOUBLE 0.0;
+        label1: BEGIN 
+            DECLARE acc_amount, negative_acc, acc_id INT default 0;
+            DECLARE val DOUBLE DEFAULT 0.0;
+            DECLARE valname CHAR(3);
             DECLARE str CHAR;
+            DECLARE  accounts_ CURSOR FOR
+            SELECT accounts.id, accounts.value, currencies.name  FROM accounts LEFT JOIN currencies ON currencies.ISOnum = accounts.ISOnum WHERE client_id = cid;
+            DECLARE CONTINUE HANDLER FOR SQLSTATE '02000' SET astate = 0;
+	OPEN accounts_;
+            FETCH clients_ INTO cid, f, s, th;
+            SET names_ = CONCAT(f, ' ',  s, ' ',  th);
+            SET acc_amount = (SELECT COUNT(*) FROM accounts WHERE client_id = cid LIMIT 1);
+            SET negative_acc = (SELECT COUNT(*) FROM accounts WHERE client_id = cid AND value < 0.0 LIMIT 1);
+            IF (acc_amount > 1 AND negative_acc > 0) THEN
+            SET str = '';
             WHILE(astate = 1)
             DO
-                FETCH accounts_ INTO val;
-                str = CONCAT 
+                FETCH accounts_ INTO acc_id, val, valname;
+                SET str = CONCAT(str, acc_id, ' (', valname, '): ', val, ' ');
             END WHILE;
+            INSERT INTO  debtors (id, names, accounts_values) VALUES (cid, names_, str);
+            END IF;
+            CLOSE accounts_;
+            END label1;
     END WHILE;
+    CLOSE clients_;
 END;
+
+CREATE FUNCTION get_rate (cid INT) RETURNS INT
+NOT DETERMINISTIC
+READS SQL DATA
+SQL SECURITY INVOKER
+BEGIN
+    DECLARE rate DOUBLE DEFAULT 9.0;
+    DECLARE min_rate DOUBLE DEFAULT 4.0;
+    DECLARE years INT DEFAULT 0;
+    SET years = (SELECT YEAR(open_date) AS y FROM accounts WHERE client_id = cid ORDER BY y ASC LIMIT 1 );
+    SET years = ABS(years - YEAR(CURRENT_TIMESTAMP));
+    SET rate = rate - 0.1*years;
+    mid: BEGIN 
+        DECLARE state INT DEFAULT 1;
+        DECLARE income, outcome, val  DOUBLE DEFAULT 0.0;
+        DECLARE operation VARCHAR(255);
+        DECLARE ops_ CURSOR FOR
+            SELECT ops.value, ops.optype FROM operations_log AS ops LEFT JOIN accounts ON ops.accountid = accounts.id WHERE accounts.client_id = cid AND ABS(YEAR(ops.opdate) - YEAR(CURRENT_TIMESTAMP)) < 3 ;
+            DECLARE CONTINUE HANDLER FOR SQLSTATE '02000' SET state = 0;
+            OPEN ops_;
+            WHILE (state = 1) 
+            DO
+                FETCH ops_ INTO val, operation;
+                IF(operation = "addition") THEN 
+                    SET income = income + val;
+                END IF;
+                IF (operation = 'write-off') THEN 
+                    SET outcome = outcome + val;
+                END IF;
+            END WHILE;
+            CLOSE ops_;
+            IF (income DIV outcome > 1) THEN 
+                 SET RATE = RATE - 0.1*(income DIV outcome) - 0.1*(income % outcome);
+            END IF;
+            IF (RATE < min_rate) THEN 
+                SET RATE  = 4.0;
+            END IF;
+    END mid;
+    RETURN RATE;
+END;
+
+CREATE TRIGGER account_close_checker BEFORE UPDATE on accounts 
+FOR EACH ROW 
+BEGIN 
+    DECLARE rest DOUBLE DEFAULT 0.0;
+        DECLARE cacc_id, acc_id, c_id INT;
+    IF (NEW.close_DATA != NULL) THEN
+        SET cacc_id = (SELECT id FROM accounts WHERE NEW.close_DATA != NULL LIMIT 1);
+        SET rest = (SELECT value FROM accounts WHERE id = cacc_id LIMIT 1);
+        IF (rest < 0.0) THEN 
+            SIGNAL SQLSTATE '42927' SET MESSAGE_TEXT = 'ERROR: BALANCE IS NEGATIVE!';
+        END IF;
+        IF (rest >0.0) THEN 
+            SET c_id = (SELECT client_id FROM accounts WHERE id = cacc_id LIMIT 1);
+            SET acc_id = (SELECT id FROM accounts WHERE client_id = c_id AND close_DATA != NULL LIMIT 1);
+            IF (acc_id = NULL ) THEN 
+                SIGNAL SQLSTATE '42927' SET MESSAGE_TEXT = 'ERROR: NO OTHER ACCOUNTS!';
+            END IF;
+             INSERT INTO operations_log (accountid, optype, value) VALUES (cacc_id, 'wite-off', rest), (acc_id, 'addition', rest);
+        END IF;
+    END IF;
+END;
+
